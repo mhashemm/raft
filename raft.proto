@@ -1,0 +1,15 @@
+// protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=require_unimplemented_servers=false:. --go-grpc_opt=paths=source_relative raft.proto
+
+option go_package = "github.com/mhashemm/raft/main";
+package main;
+
+message RequestVoteRequest {}
+message RequestVoteResponse {}
+
+message AppendEntriesRequest {}
+message AppendEntriesResponse {}
+
+service raft {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse) {}
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}

@@ -72,7 +72,7 @@ func (l *Log) Count() uint64 {
 	return uint64(len(l.s))
 }
 
-func (l *Log) Append(entries []Entry) {
+func (l *Log) Append(entries []Entry) error {
 	// _, err := l.f.Seek(0, 2)
 	// if err != nil {
 	// 	panic(err)
@@ -92,6 +92,7 @@ func (l *Log) Append(entries []Entry) {
 	// 	panic(err)
 	// }
 	l.s = append(l.s, entries...)
+	return nil
 }
 
 func (l *Log) LastEntry() Entry {

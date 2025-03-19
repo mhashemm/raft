@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -22,16 +23,21 @@ const (
 
 type Server struct {
 	State
-	mu          sync.Mutex
-	log         Log
-	commitIndex uint64
-	lastApplied uint64
-	nextIndex   map[string]uint64
-	matchIndex  map[string]uint64
-	role        Role
-	peers       Peers
-	logger      *slog.Logger
-	leaderId    string
+	mu             sync.Mutex
+	log            Log
+	commitIndex    uint64
+	lastApplied    uint64
+	nextIndex      map[string]uint64
+	matchIndex     map[string]uint64
+	role           Role
+	peers          Peers
+	logger         *slog.Logger
+	electionTicker *time.Ticker
+	heartbeat      chan struct{}
+}
+
+func randomDuration() time.Duration {
+	return time.Duration((rand.IntN(150) + 150)) * time.Millisecond
 }
 
 func NewServer() *Server {
@@ -41,7 +47,7 @@ func NewServer() *Server {
 	l.Open()
 
 	lastLogIndex := l.Count()
-	return &Server{
+	server := &Server{
 		State: s,
 		log:   l,
 		nextIndex: map[string]uint64{
@@ -50,8 +56,77 @@ func NewServer() *Server {
 		matchIndex: map[string]uint64{
 			s.Id: lastLogIndex,
 		},
-		peers:  Peers{},
-		logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})),
+		peers:          Peers{},
+		logger:         slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})),
+		electionTicker: time.NewTicker(randomDuration()),
+		heartbeat:      make(chan struct{}, 1),
+	}
+	go server.electionWorker()
+	return server
+}
+
+func (s *Server) electionWorker() {
+	for {
+		select {
+		case <-s.electionTicker.C:
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			lastEntry := s.log.LastEntry()
+			s.CurrentTerm += 1
+			s.VotedFor = s.Id
+			wg := sync.WaitGroup{}
+			wg.Add(len(s.peers))
+			c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
+			majorty := (len(s.peers) / 2) + 1
+			votes := atomic.Int32{}
+			resTerms := make(chan uint64, len(s.peers))
+			for pid, peer := range s.peers {
+				go func() {
+					defer wg.Done()
+					req := &RequestVoteRequest{
+						Term:         s.CurrentTerm,
+						CandidateId:  s.Id,
+						LastLogIndex: lastEntry.Index,
+						LastLogTerm:  lastEntry.Term,
+					}
+					res, err := peer.client.RequestVote(c, req)
+					if err != nil {
+						s.logger.Error("%s [pid=%s]", err.Error(), pid)
+						return
+					}
+					resTerms <- res.GetTerm()
+					if res.GetVoteGranted() {
+						votes.Add(1)
+					}
+				}()
+			}
+			wg.Wait()
+			cancel()
+			close(resTerms)
+			gotHigherTerm := false
+			for t := range resTerms {
+				if t > s.CurrentTerm {
+					gotHigherTerm = true
+					s.CurrentTerm = t
+				}
+			}
+
+			s.electionTicker.Stop()
+			s.electionTicker = time.NewTicker(randomDuration())
+
+			if gotHigherTerm {
+				s.role = follower
+				continue
+			}
+
+			if votes.Load() >= int32(majorty) {
+				s.role = leader
+				// TODO: reinit the rest
+			}
+
+		case <-s.heartbeat:
+			continue
+		}
 	}
 }
 
@@ -59,15 +134,22 @@ func (s *Server) RequestVote(c context.Context, req *RequestVoteRequest) (*Reque
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if req.Term > s.CurrentTerm {
-		s.role = follower
-		s.CurrentTerm = req.Term
-		s.Persist()
+	if req.Term < s.CurrentTerm {
+		return &RequestVoteResponse{Term: s.CurrentTerm, VoteGranted: false}, nil
 	}
 
-	if (s.VotedFor == "" || s.VotedFor == req.CandidateId) &&
-		req.Term > s.CurrentTerm &&
-		req.LastLogIndex >= s.matchIndex[s.Id] {
+	if req.Term == s.CurrentTerm && s.VotedFor != "" {
+		return &RequestVoteResponse{Term: s.CurrentTerm, VoteGranted: s.VotedFor == req.CandidateId}, nil
+	}
+
+	s.role = follower
+	s.CurrentTerm = req.Term
+	s.Persist()
+
+	if (s.VotedFor == "" || s.VotedFor == req.CandidateId) && req.LastLogIndex >= s.matchIndex[s.Id] {
+		s.VotedFor = req.CandidateId
+		s.electionTicker.Stop()
+		s.electionTicker = time.NewTicker(randomDuration())
 		return &RequestVoteResponse{Term: s.CurrentTerm, VoteGranted: true}, nil
 	}
 
@@ -78,22 +160,16 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.role == follower && req.LeaderId == "" {
-		return nil, status.Error(codes.Aborted, s.leaderId)
-	}
-
 	if req.Term < s.CurrentTerm {
 		return &AppendEntriesResponse{Term: s.CurrentTerm, Success: false}, nil
 	}
+
+	s.heartbeat <- struct{}{}
 
 	if req.Term > s.CurrentTerm {
 		s.role = follower
 		s.CurrentTerm = req.Term
 		s.Persist()
-	}
-
-	if s.role == follower {
-		s.leaderId = req.LeaderId
 	}
 
 	prevEntry := s.log.LastEntry()

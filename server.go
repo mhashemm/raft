@@ -21,19 +21,27 @@ const (
 	leader
 )
 
+const (
+	heartbeatTickerDuration = 100 * time.Millisecond
+)
+
 type Server struct {
 	State
-	mu             sync.Mutex
-	log            Log
-	commitIndex    uint64
-	lastApplied    uint64
-	nextIndex      map[string]uint64
-	matchIndex     map[string]uint64
-	role           Role
-	peers          Peers
-	logger         *slog.Logger
-	electionTicker *time.Ticker
-	heartbeat      chan struct{}
+	mu                     sync.Mutex
+	log                    Log
+	commitIndex            uint64
+	lastApplied            uint64
+	lastLogIndex           uint64
+	lastLogTerm            uint64
+	nextIndex              map[string]uint64
+	matchIndex             map[string]uint64
+	role                   Role
+	peers                  Peers
+	logger                 *slog.Logger
+	electionTickerDuration time.Duration
+	electionTicker         *time.Ticker
+	heartbeatTicker        *time.Ticker
+	lastHeartBeat          time.Time
 }
 
 func randomDuration() time.Duration {
@@ -46,87 +54,119 @@ func NewServer() *Server {
 	l := Log{}
 	l.Open()
 
-	lastLogIndex := l.Count()
+	lastEntry := l.LastEntry()
+	electionTickerDuration := randomDuration()
+	heartbeatTicker := time.NewTicker(heartbeatTickerDuration)
+	heartbeatTicker.Stop()
+
 	server := &Server{
-		State: s,
-		log:   l,
-		nextIndex: map[string]uint64{
-			s.Id: lastLogIndex + 1,
-		},
-		matchIndex: map[string]uint64{
-			s.Id: lastLogIndex,
-		},
-		peers:          Peers{},
-		logger:         slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})),
-		electionTicker: time.NewTicker(randomDuration()),
-		heartbeat:      make(chan struct{}, 1),
+		State:                  s,
+		log:                    l,
+		lastLogIndex:           lastEntry.Index,
+		lastLogTerm:            lastEntry.Term,
+		nextIndex:              map[string]uint64{},
+		matchIndex:             map[string]uint64{},
+		peers:                  Peers{},
+		logger:                 slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})),
+		electionTickerDuration: electionTickerDuration,
+		electionTicker:         time.NewTicker(electionTickerDuration),
+		heartbeatTicker:        heartbeatTicker,
+		lastHeartBeat:          time.Unix(0, 0),
 	}
 	go server.electionWorker()
+	go server.hearbeatWorker()
 	return server
 }
 
-func (s *Server) electionWorker() {
-	for {
-		select {
-		case <-s.electionTicker.C:
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			lastEntry := s.log.LastEntry()
-			s.CurrentTerm += 1
-			s.VotedFor = s.Id
-			wg := sync.WaitGroup{}
-			wg.Add(len(s.peers))
-			c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
-			majorty := (len(s.peers) / 2) + 1
-			votes := atomic.Int32{}
-			resTerms := make(chan uint64, len(s.peers))
-			for pid, peer := range s.peers {
-				go func() {
-					defer wg.Done()
-					req := &RequestVoteRequest{
-						Term:         s.CurrentTerm,
-						CandidateId:  s.Id,
-						LastLogIndex: lastEntry.Index,
-						LastLogTerm:  lastEntry.Term,
-					}
-					res, err := peer.client.RequestVote(c, req)
-					if err != nil {
-						s.logger.Error("%s [pid=%s]", err.Error(), pid)
-						return
-					}
-					resTerms <- res.GetTerm()
-					if res.GetVoteGranted() {
-						votes.Add(1)
-					}
-				}()
-			}
-			wg.Wait()
-			cancel()
-			close(resTerms)
-			gotHigherTerm := false
-			for t := range resTerms {
-				if t > s.CurrentTerm {
-					gotHigherTerm = true
-					s.CurrentTerm = t
-				}
-			}
-
-			s.electionTicker.Stop()
-			s.electionTicker = time.NewTicker(randomDuration())
-
-			if gotHigherTerm {
-				s.role = follower
-				continue
-			}
-
-			if votes.Load() >= int32(majorty) {
-				s.role = leader
-				// TODO: reinit the rest
-			}
-
-		case <-s.heartbeat:
+func (s *Server) hearbeatWorker() {
+	for range s.heartbeatTicker.C {
+		if time.Since(s.lastHeartBeat).Abs() < heartbeatTickerDuration {
 			continue
 		}
+		s.mu.Lock()
+		wg := sync.WaitGroup{}
+		wg.Add(len(s.peers))
+		c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
+		for pid, peer := range s.peers {
+			go func() {
+				defer wg.Done()
+				req := &AppendEntriesRequest{
+					Term:         s.CurrentTerm,
+					LeaderId:     s.Id,
+					PrevLogIndex: s.lastLogIndex,
+					LeaderCommit: s.commitIndex,
+					PrevLogTerm:  s.lastLogTerm,
+				}
+				_, err := peer.client.AppendEntries(c, req)
+				if err != nil {
+					s.logger.Error("%s [pid=%s]", err.Error(), pid)
+					return
+				}
+			}()
+		}
+		wg.Wait()
+		cancel()
+		s.lastHeartBeat = time.Now()
+		s.mu.Unlock()
+	}
+}
+
+func (s *Server) electionWorker() {
+	for range s.electionTicker.C {
+		if time.Since(s.lastHeartBeat) < s.electionTickerDuration {
+			continue
+		}
+		s.mu.Lock()
+		s.CurrentTerm += 1
+		s.VotedFor = s.Id
+		wg := sync.WaitGroup{}
+		wg.Add(len(s.peers))
+		c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
+		majorty := (len(s.peers) / 2) + 1
+		votes := atomic.Int32{}
+		resTerms := make(chan uint64, len(s.peers))
+		for pid, peer := range s.peers {
+			go func() {
+				defer wg.Done()
+				req := &RequestVoteRequest{
+					Term:         s.CurrentTerm,
+					CandidateId:  s.Id,
+					LastLogIndex: s.lastLogIndex,
+					LastLogTerm:  s.lastLogTerm,
+				}
+				res, err := peer.client.RequestVote(c, req)
+				if err != nil {
+					s.logger.Error("%s [pid=%s]", err.Error(), pid)
+					return
+				}
+				resTerms <- res.GetTerm()
+				if res.GetVoteGranted() {
+					votes.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		cancel()
+		close(resTerms)
+		gotHigherTerm := false
+		for t := range resTerms {
+			if t > s.CurrentTerm {
+				gotHigherTerm = true
+				s.CurrentTerm = t
+			}
+		}
+		s.electionTickerDuration = randomDuration()
+		s.electionTicker.Reset(s.electionTickerDuration)
+
+		if gotHigherTerm {
+			s.role = follower
+			s.heartbeatTicker.Stop()
+		} else if votes.Load() >= int32(majorty) {
+			s.role = leader
+			s.heartbeatTicker.Reset(heartbeatTickerDuration)
+			// TODO: reinit the rest
+		}
+		s.mu.Unlock()
 	}
 }
 
@@ -143,13 +183,14 @@ func (s *Server) RequestVote(c context.Context, req *RequestVoteRequest) (*Reque
 	}
 
 	s.role = follower
+	s.heartbeatTicker.Stop()
 	s.CurrentTerm = req.Term
 	s.Persist()
 
 	if (s.VotedFor == "" || s.VotedFor == req.CandidateId) && req.LastLogIndex >= s.matchIndex[s.Id] {
 		s.VotedFor = req.CandidateId
-		s.electionTicker.Stop()
-		s.electionTicker = time.NewTicker(randomDuration())
+		s.electionTickerDuration = randomDuration()
+		s.electionTicker.Reset(s.electionTickerDuration)
 		return &RequestVoteResponse{Term: s.CurrentTerm, VoteGranted: true}, nil
 	}
 
@@ -164,17 +205,16 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 		return &AppendEntriesResponse{Term: s.CurrentTerm, Success: false}, nil
 	}
 
-	s.heartbeat <- struct{}{}
+	s.lastHeartBeat = time.Now()
 
 	if req.Term > s.CurrentTerm {
+		s.heartbeatTicker.Stop()
 		s.role = follower
 		s.CurrentTerm = req.Term
 		s.Persist()
 	}
 
-	prevEntry := s.log.LastEntry()
-
-	if req.PrevLogIndex != prevEntry.Index || req.PrevLogTerm != prevEntry.Term {
+	if req.PrevLogIndex != s.lastLogIndex || req.PrevLogTerm != s.lastLogTerm {
 		return &AppendEntriesResponse{Term: s.CurrentTerm, Success: false}, nil
 	}
 
@@ -203,11 +243,13 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 		}
 	}
 
+	prevLogIndex, prevLogTerm := s.lastLogIndex, s.lastLogTerm
+
 	entries := make([]Entry, 0, len(req.Entries))
-	for _, e := range req.Entries {
+	for i, e := range req.Entries {
 		entries = append(entries, Entry{
 			Term:  s.CurrentTerm,
-			Index: s.nextIndex[s.Id],
+			Index: s.lastLogIndex + uint64(i) + 1,
 			Data:  e,
 		})
 		s.nextIndex[s.Id] += 1
@@ -217,6 +259,9 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	if err != nil {
 		panic(err)
 	}
+
+	s.lastLogIndex += uint64(len(req.Entries))
+	s.lastLogTerm = req.Term
 
 	if s.role == follower {
 		return &AppendEntriesResponse{Term: s.CurrentTerm, Success: true}, nil
@@ -234,9 +279,9 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 			req := &AppendEntriesRequest{
 				Term:         s.CurrentTerm,
 				LeaderId:     s.Id,
-				PrevLogIndex: prevEntry.Index,
+				PrevLogIndex: prevLogIndex,
 				LeaderCommit: s.commitIndex,
-				PrevLogTerm:  prevEntry.Term,
+				PrevLogTerm:  prevLogTerm,
 				Type:         req.Type,
 				Entries:      req.Entries,
 			}
@@ -253,7 +298,6 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	wg.Wait()
 
 	if acks.Load() >= int32(majorty) {
-		//TODO: commit the log first
 		s.commitIndex = s.nextIndex[s.Id] - 1
 	}
 

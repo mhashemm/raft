@@ -8,9 +8,9 @@ import (
 )
 
 type State struct {
-	Id          string `json:"id"`
-	CurrentTerm uint64 `json:"currentTerm"`
-	VotedFor    string `json:"votedFor"`
+	Id           string `json:"id"`
+	CurrentTerm  uint64 `json:"currentTerm"`
+	VotedFor     string `json:"votedFor"`
 }
 
 func (s *State) Init() {

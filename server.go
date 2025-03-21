@@ -99,7 +99,7 @@ func (s *Server) hearbeatWorker() {
 				}
 				_, err := peer.client.AppendEntries(c, req)
 				if err != nil {
-					s.logger.Error("%s [pid=%s]", err.Error(), pid)
+					s.logger.Error(err.Error(), "pid", pid)
 					return
 				}
 			}()
@@ -136,7 +136,7 @@ func (s *Server) electionWorker() {
 				}
 				res, err := peer.client.RequestVote(c, req)
 				if err != nil {
-					s.logger.Error("%s [pid=%s]", err.Error(), pid)
+					s.logger.Error(err.Error(), "pid", pid)
 					return
 				}
 				resTerms <- res.GetTerm()
@@ -162,6 +162,7 @@ func (s *Server) electionWorker() {
 			s.role = follower
 			s.heartbeatTicker.Stop()
 		} else if votes.Load() >= int32(majorty) {
+			s.logger.Info("i am a leader", "id", s.Id)
 			s.role = leader
 			s.heartbeatTicker.Reset(heartbeatTickerDuration)
 			// TODO: reinit the rest
@@ -287,7 +288,7 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 			}
 			res, err := peer.client.AppendEntries(c, req)
 			if err != nil {
-				s.logger.Error("%s [pid=%s]", err.Error(), pid)
+				s.logger.Error(err.Error(), "pid", pid)
 				return
 			}
 			if res.GetSuccess() {

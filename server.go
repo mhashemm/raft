@@ -36,7 +36,6 @@ type Server struct {
 	nextIndex              map[string]uint64
 	matchIndex             map[string]uint64
 	role                   Role
-	peers                  Peers
 	logger                 *slog.Logger
 	electionTickerDuration time.Duration
 	electionTicker         *time.Ticker
@@ -66,7 +65,6 @@ func NewServer() *Server {
 		lastLogTerm:            lastEntry.Term,
 		nextIndex:              map[string]uint64{},
 		matchIndex:             map[string]uint64{},
-		peers:                  Peers{},
 		logger:                 slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})),
 		electionTickerDuration: electionTickerDuration,
 		electionTicker:         time.NewTicker(electionTickerDuration),
@@ -99,9 +97,9 @@ func (s *Server) hearbeatWorker() {
 		}
 		s.mu.Lock()
 		wg := sync.WaitGroup{}
-		wg.Add(len(s.peers))
+		wg.Add(len(s.Peers))
 		c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
-		for pid, peer := range s.peers {
+		for pid, peer := range s.Peers {
 			go func() {
 				defer wg.Done()
 				req := &AppendEntriesRequest{
@@ -135,13 +133,13 @@ func (s *Server) electionWorker() {
 		s.CurrentTerm += 1
 		s.VotedFor = s.Id
 		wg := sync.WaitGroup{}
-		wg.Add(len(s.peers))
+		wg.Add(len(s.Peers))
 		c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
-		majority := (len(s.peers) / 2) + 1
+		majority := (len(s.Peers) / 2) + 1
 		votes := atomic.Int32{}
 		votes.Add(1) //ourselves
-		resTerms := make(chan uint64, len(s.peers))
-		for pid, peer := range s.peers {
+		resTerms := make(chan uint64, len(s.Peers))
+		for pid, peer := range s.Peers {
 			go func() {
 				defer wg.Done()
 				req := &RequestVoteRequest{
@@ -242,17 +240,11 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 				s.logger.Error(err.Error())
 				return nil, status.Error(codes.InvalidArgument, err.Error())
 			}
-			err = s.peers.Remove(change.Remove)
-			if err != nil {
-				s.logger.Error(err.Error())
-				return nil, status.Error(codes.Internal, err.Error())
-			}
-			err = s.peers.Add(change.Add)
-			if err != nil {
-				s.logger.Error(err.Error())
-				return nil, status.Error(codes.Internal, err.Error())
-			}
+
+			s.Peers.Remove(change.Remove)
+			s.Peers.Add(change.Add)
 		}
+		s.Persist()
 	}
 
 	prevLogIndex, prevLogTerm := s.lastLogIndex, s.lastLogTerm
@@ -280,13 +272,13 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	}
 
 	wg := sync.WaitGroup{}
-	wg.Add(len(s.peers))
+	wg.Add(len(s.Peers))
 	c, cancel := context.WithTimeout(c, time.Duration(300)*time.Millisecond)
 	defer cancel()
-	majority := (len(s.peers) / 2) + 1
+	majority := (len(s.Peers) / 2) + 1
 	acks := atomic.Int32{}
-	resTerms := make(chan uint64, len(s.peers))
-	for pid, peer := range s.peers {
+	resTerms := make(chan uint64, len(s.Peers))
+	for pid, peer := range s.Peers {
 		go func() {
 			defer wg.Done()
 			req := &AppendEntriesRequest{

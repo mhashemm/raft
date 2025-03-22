@@ -8,9 +8,10 @@ import (
 )
 
 type State struct {
-	Id           string `json:"id"`
-	CurrentTerm  uint64 `json:"currentTerm"`
-	VotedFor     string `json:"votedFor"`
+	Id          string `json:"id"`
+	CurrentTerm uint64 `json:"currentTerm"`
+	VotedFor    string `json:"votedFor"`
+	Peers       Peers  `json:"peers"`
 }
 
 func (s *State) Init() {
@@ -29,6 +30,10 @@ func (s *State) Init() {
 		s.Id = uuid.NewString()
 		s.Persist()
 	}
+	if len(s.Peers) == 0 {
+		s.Peers = Peers{}
+	}
+	s.Peers.Init()
 }
 
 func (s *State) Persist() {

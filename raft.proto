@@ -16,7 +16,11 @@ message RequestVoteResponse {
 }
 
 message ClusterChange {
-	repeated string add = 1;
+	message Peer {
+		string id = 1;
+		string target = 2;
+	}
+	repeated Peer add = 1;
 	repeated string remove = 2;
 }
 

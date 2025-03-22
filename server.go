@@ -137,7 +137,7 @@ func (s *Server) electionWorker() {
 		wg := sync.WaitGroup{}
 		wg.Add(len(s.peers))
 		c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
-		majorty := (len(s.peers) / 2) + 1
+		majority := (len(s.peers) / 2) + 1
 		votes := atomic.Int32{}
 		votes.Add(1) //ourselves
 		resTerms := make(chan uint64, len(s.peers))
@@ -176,7 +176,7 @@ func (s *Server) electionWorker() {
 
 		if gotHigherTerm {
 			s.switchToFollower()
-		} else if votes.Load() >= int32(majorty) {
+		} else if votes.Load() >= int32(majority) {
 			s.logger.Info("i am a leader", "id", s.Id)
 			s.switchToLeader()
 		}
@@ -283,7 +283,7 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	wg.Add(len(s.peers))
 	c, cancel := context.WithTimeout(c, time.Duration(300)*time.Millisecond)
 	defer cancel()
-	majorty := (len(s.peers) / 2) + 1
+	majority := (len(s.peers) / 2) + 1
 	acks := atomic.Int32{}
 	resTerms := make(chan uint64, len(s.peers))
 	for pid, peer := range s.peers {
@@ -320,7 +320,7 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 		}
 	}
 
-	if acks.Load() >= int32(majorty) {
+	if acks.Load() >= int32(majority) {
 		s.commitIndex = s.nextIndex[s.Id] - 1
 	}
 

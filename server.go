@@ -78,8 +78,22 @@ func NewServer() *Server {
 	return server
 }
 
+func (s *Server) switchToLeader() {
+	s.role = leader
+	s.electionTicker.Stop()
+	s.electionTickerDuration = 0
+	s.heartbeatTicker.Reset(heartbeatTickerDuration)
+}
+func (s *Server) switchToFollower() {
+	s.role = follower
+	s.heartbeatTicker.Stop()
+	s.electionTickerDuration = randomDuration()
+	s.electionTicker.Reset(s.electionTickerDuration)
+}
+
 func (s *Server) hearbeatWorker() {
-	for range s.heartbeatTicker.C {
+	for t := range s.heartbeatTicker.C {
+		s.logger.Info("heartbeat", "tick", t)
 		if time.Since(s.lastHeartBeat).Abs() < heartbeatTickerDuration {
 			continue
 		}
@@ -112,8 +126,9 @@ func (s *Server) hearbeatWorker() {
 }
 
 func (s *Server) electionWorker() {
-	for range s.electionTicker.C {
-		if time.Since(s.lastHeartBeat) < s.electionTickerDuration {
+	for t := range s.electionTicker.C {
+		s.logger.Info("election tick", "tick", t)
+		if s.role == leader || time.Since(s.lastHeartBeat) < s.electionTickerDuration {
 			continue
 		}
 		s.mu.Lock()
@@ -160,13 +175,10 @@ func (s *Server) electionWorker() {
 		s.electionTicker.Reset(s.electionTickerDuration)
 
 		if gotHigherTerm {
-			s.role = follower
-			s.heartbeatTicker.Stop()
+			s.switchToFollower()
 		} else if votes.Load() >= int32(majorty) {
 			s.logger.Info("i am a leader", "id", s.Id)
-			s.role = leader
-			s.heartbeatTicker.Reset(heartbeatTickerDuration)
-			// TODO: reinit the rest
+			s.switchToLeader()
 		}
 		s.mu.Unlock()
 	}
@@ -184,8 +196,7 @@ func (s *Server) RequestVote(c context.Context, req *RequestVoteRequest) (*Reque
 		return &RequestVoteResponse{Term: s.CurrentTerm, VoteGranted: s.VotedFor == req.CandidateId}, nil
 	}
 
-	s.role = follower
-	s.heartbeatTicker.Stop()
+	s.switchToFollower()
 	s.CurrentTerm = req.Term
 	s.Persist()
 
@@ -210,8 +221,7 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	s.lastHeartBeat = time.Now()
 
 	if req.Term > s.CurrentTerm {
-		s.heartbeatTicker.Stop()
-		s.role = follower
+		s.switchToFollower()
 		s.CurrentTerm = req.Term
 		s.Persist()
 	}
@@ -303,12 +313,9 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	close(resTerms)
 	for t := range resTerms {
 		if t > s.CurrentTerm {
-			s.role = follower
+			s.switchToFollower()
 			s.CurrentTerm = t
-			s.heartbeatTicker.Stop()
 			s.Persist()
-			s.electionTickerDuration = randomDuration()
-			s.electionTicker.Reset(s.electionTickerDuration)
 			return &AppendEntriesResponse{Term: s.CurrentTerm, Success: false}, nil
 		}
 	}

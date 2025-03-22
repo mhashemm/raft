@@ -14,10 +14,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type Role byte
-
 const (
-	follower Role = iota
+	follower uint32 = iota
 	leader
 )
 
@@ -35,7 +33,7 @@ type Server struct {
 	lastLogTerm            uint64
 	nextIndex              map[string]uint64
 	matchIndex             map[string]uint64
-	role                   Role
+	role                   atomic.Uint32
 	logger                 *slog.Logger
 	electionTickerDuration time.Duration
 	electionTicker         *time.Ticker
@@ -77,13 +75,13 @@ func NewServer() *Server {
 }
 
 func (s *Server) switchToLeader() {
-	s.role = leader
+	s.role.Store(leader)
 	s.electionTicker.Stop()
 	s.electionTickerDuration = 0
 	s.heartbeatTicker.Reset(heartbeatTickerDuration)
 }
 func (s *Server) switchToFollower() {
-	s.role = follower
+	s.role.Store(follower)
 	s.heartbeatTicker.Stop()
 	s.electionTickerDuration = randomDuration()
 	s.electionTicker.Reset(s.electionTickerDuration)
@@ -126,7 +124,7 @@ func (s *Server) hearbeatWorker() {
 func (s *Server) electionWorker() {
 	for t := range s.electionTicker.C {
 		s.logger.Info("election tick", "tick", t)
-		if s.role == leader || time.Since(s.lastHeartBeat) < s.electionTickerDuration {
+		if s.role.Load() == leader || time.Since(s.lastHeartBeat) < s.electionTickerDuration {
 			continue
 		}
 		s.mu.Lock()
@@ -267,7 +265,7 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	s.lastLogIndex += uint64(len(req.Entries))
 	s.lastLogTerm = req.Term
 
-	if s.role == follower {
+	if s.role.Load() == follower {
 		return &AppendEntriesResponse{Term: s.CurrentTerm, Success: true}, nil
 	}
 

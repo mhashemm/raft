@@ -124,6 +124,7 @@ func (s *Server) electionWorker() {
 		c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
 		majorty := (len(s.peers) / 2) + 1
 		votes := atomic.Int32{}
+		votes.Add(1) //ourselves
 		resTerms := make(chan uint64, len(s.peers))
 		for pid, peer := range s.peers {
 			go func() {
@@ -274,6 +275,7 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	defer cancel()
 	majorty := (len(s.peers) / 2) + 1
 	acks := atomic.Int32{}
+	resTerms := make(chan uint64, len(s.peers))
 	for pid, peer := range s.peers {
 		go func() {
 			defer wg.Done()
@@ -291,12 +293,25 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 				s.logger.Error(err.Error(), "pid", pid)
 				return
 			}
+			resTerms <- res.GetTerm()
 			if res.GetSuccess() {
 				acks.Add(1)
 			}
 		}()
 	}
 	wg.Wait()
+	close(resTerms)
+	for t := range resTerms {
+		if t > s.CurrentTerm {
+			s.role = follower
+			s.CurrentTerm = t
+			s.heartbeatTicker.Stop()
+			s.Persist()
+			s.electionTickerDuration = randomDuration()
+			s.electionTicker.Reset(s.electionTickerDuration)
+			return &AppendEntriesResponse{Term: s.CurrentTerm, Success: false}, nil
+		}
+	}
 
 	if acks.Load() >= int32(majorty) {
 		s.commitIndex = s.nextIndex[s.Id] - 1

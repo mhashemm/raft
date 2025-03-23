@@ -265,6 +265,10 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	s.lastLogIndex += uint64(len(req.Entries))
 	s.lastLogTerm = req.Term
 
+	if req.LeaderCommit > s.commitIndex {
+		s.commitIndex = min(req.LeaderCommit, s.lastLogIndex)
+	}
+
 	if s.role.Load() == follower {
 		return &AppendEntriesResponse{Term: s.CurrentTerm, Success: true}, nil
 	}

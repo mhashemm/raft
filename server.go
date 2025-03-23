@@ -31,8 +31,6 @@ type Server struct {
 	lastApplied            uint64
 	lastLogIndex           uint64
 	lastLogTerm            uint64
-	nextIndex              map[string]uint64
-	matchIndex             map[string]uint64
 	role                   atomic.Uint32
 	logger                 *slog.Logger
 	electionTickerDuration time.Duration
@@ -61,8 +59,6 @@ func NewServer() *Server {
 		log:                    l,
 		lastLogIndex:           lastEntry.Index,
 		lastLogTerm:            lastEntry.Term,
-		nextIndex:              map[string]uint64{},
-		matchIndex:             map[string]uint64{},
 		logger:                 slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})),
 		electionTickerDuration: electionTickerDuration,
 		electionTicker:         time.NewTicker(electionTickerDuration),
@@ -196,7 +192,7 @@ func (s *Server) RequestVote(c context.Context, req *RequestVoteRequest) (*Reque
 	s.CurrentTerm = req.Term
 	s.Persist()
 
-	if (s.VotedFor == "" || s.VotedFor == req.CandidateId) && req.LastLogIndex >= s.matchIndex[s.Id] {
+	if (s.VotedFor == "" || s.VotedFor == req.CandidateId) && req.LastLogIndex >= s.lastLogIndex {
 		s.VotedFor = req.CandidateId
 		s.electionTickerDuration = randomDuration()
 		s.electionTicker.Reset(s.electionTickerDuration)
@@ -254,7 +250,6 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 			Index: s.lastLogIndex + uint64(i) + 1,
 			Data:  e,
 		})
-		s.nextIndex[s.Id] += 1
 	}
 
 	err := s.log.Append(entries)
@@ -277,7 +272,6 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	wg.Add(len(s.Peers))
 	c, cancel := context.WithTimeout(c, time.Duration(300)*time.Millisecond)
 	defer cancel()
-	majority := (len(s.Peers) / 2) + 1
 	acks := atomic.Int32{}
 	resTerms := make(chan uint64, len(s.Peers))
 	for pid, peer := range s.Peers {
@@ -312,10 +306,6 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 			s.Persist()
 			return &AppendEntriesResponse{Term: s.CurrentTerm, Success: false}, nil
 		}
-	}
-
-	if acks.Load() >= int32(majority) {
-		s.commitIndex = s.nextIndex[s.Id] - 1
 	}
 
 	return &AppendEntriesResponse{Term: s.CurrentTerm, Success: true}, nil

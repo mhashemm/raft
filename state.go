@@ -100,11 +100,27 @@ func (l *Log) Append(entries []Entry) error {
 	return nil
 }
 
-func (l *Log) LastEntry() Entry {
-	if len(l.s) == 0 {
-		return Entry{}
+func (l *Log) LastNEntries(n uint64) []Entry {
+	len := uint64(len(l.s))
+	if len == 0 {
+		return []Entry{}
 	}
-	return l.s[len(l.s)-1]
+	if len <= n {
+		return l.s[:]
+	}
+	return l.s[len-n:]
+}
+
+func (l *Log) DeleteLastNEntries(n uint64) {
+	len := uint64(len(l.s))
+	if len == 0 {
+		return
+	}
+	if len <= n {
+		l.s = []Entry{}
+	}
+
+	l.s = l.s[:len-n]
 }
 
 type Entry struct {

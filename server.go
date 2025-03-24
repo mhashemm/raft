@@ -297,7 +297,7 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 			nextIndex := s.nextIndex[pid]
 			s.indexMu.Unlock()
 			for retry := true; retry; {
-				nEntries := s.log.LastNEntries(s.lastLogIndex - nextIndex)
+				nEntries := s.log.LastNEntries(s.lastLogIndex - nextIndex - 1)
 				req := &AppendEntriesRequest{
 					Term:         s.CurrentTerm,
 					LeaderId:     s.Id,

@@ -101,6 +101,9 @@ func (l *Log) Append(entries []Entry) error {
 }
 
 func (l *Log) LastNEntries(n uint64) []Entry {
+	if n == 0 {
+		panic("number of entries must be greater than 0")
+	}
 	len := uint64(len(l.s))
 	if len == 0 {
 		return []Entry{}
@@ -112,6 +115,9 @@ func (l *Log) LastNEntries(n uint64) []Entry {
 }
 
 func (l *Log) DeleteLastNEntries(n uint64) {
+	if n == 0 {
+		panic("number of entries must be greater than 0")
+	}
 	len := uint64(len(l.s))
 	if len == 0 {
 		return

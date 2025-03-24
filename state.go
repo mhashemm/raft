@@ -3,19 +3,22 @@ package main
 import (
 	"encoding/json"
 	"os"
-
-	"github.com/google/uuid"
 )
 
 type State struct {
-	Id          string `json:"id"`
+	id          string
 	CurrentTerm uint64 `json:"currentTerm"`
 	VotedFor    string `json:"votedFor"`
 	Peers       Peers  `json:"peers"`
 }
 
 func (s *State) Init() {
-	oldState, err := os.ReadFile("state.json")
+	id := os.Getenv("ID")
+	if id == "" {
+		panic("empty id")
+	}
+	s.id = id
+	oldState, err := os.ReadFile(id + "-state.json")
 	if err != nil && !os.IsNotExist(err) {
 		panic(err)
 	}
@@ -24,11 +27,6 @@ func (s *State) Init() {
 		if err != nil {
 			panic(err)
 		}
-	}
-	s.Id = os.Getenv("ID")
-	if s.Id == "" {
-		s.Id = uuid.NewString()
-		s.Persist()
 	}
 	if len(s.Peers) == 0 {
 		s.Peers = Peers{}
@@ -41,7 +39,7 @@ func (s *State) Persist() {
 	if err != nil {
 		panic(err)
 	}
-	err = os.WriteFile("state.json", newState, os.ModePerm)
+	err = os.WriteFile(s.id+"-state.json", newState, os.ModePerm)
 	if err != nil {
 		panic(err)
 	}
@@ -50,10 +48,12 @@ func (s *State) Persist() {
 // TODO: persist log
 type Log struct {
 	// f *os.File
-	s []Entry
+	id string
+	s  []Entry
 }
 
-func (l *Log) Open() {
+func (l *Log) Open(id string) {
+	l.id = id
 	// f, err := os.OpenFile("log", os.O_CREATE|os.O_RDWR, os.ModePerm)
 	// if err != nil {
 	// 	panic(err)

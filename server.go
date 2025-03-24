@@ -50,7 +50,7 @@ func NewServer() *Server {
 	s := State{}
 	s.Init()
 	l := Log{}
-	l.Open()
+	l.Open(s.id)
 
 	lastEntry := l.LastNEntries(1)[0]
 	electionTickerDuration := randomDuration()
@@ -109,7 +109,7 @@ func (s *Server) hearbeatWorker() {
 				defer wg.Done()
 				req := &AppendEntriesRequest{
 					Term:         s.CurrentTerm,
-					LeaderId:     s.Id,
+					LeaderId:     s.id,
 					PrevLogIndex: s.lastLogIndex,
 					LeaderCommit: s.commitIndex,
 					PrevLogTerm:  s.lastLogTerm,
@@ -136,7 +136,7 @@ func (s *Server) electionWorker() {
 		}
 		s.mu.Lock()
 		s.CurrentTerm += 1
-		s.VotedFor = s.Id
+		s.VotedFor = s.id
 		wg := sync.WaitGroup{}
 		wg.Add(len(s.Peers))
 		c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
@@ -149,7 +149,7 @@ func (s *Server) electionWorker() {
 				defer wg.Done()
 				req := &RequestVoteRequest{
 					Term:         s.CurrentTerm,
-					CandidateId:  s.Id,
+					CandidateId:  s.id,
 					LastLogIndex: s.lastLogIndex,
 					LastLogTerm:  s.lastLogTerm,
 				}
@@ -180,7 +180,7 @@ func (s *Server) electionWorker() {
 		if gotHigherTerm {
 			s.switchToFollower()
 		} else if votes.Load() >= int32(majority) {
-			s.logger.Info("i am a leader", "id", s.Id)
+			s.logger.Info("i am a leader", "id", s.id)
 			s.indexMu.Lock()
 			s.switchToLeader()
 			s.indexMu.Unlock()
@@ -300,7 +300,7 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 				nEntries := s.log.LastNEntries(s.lastLogIndex - nextIndex - 1)
 				req := &AppendEntriesRequest{
 					Term:         s.CurrentTerm,
-					LeaderId:     s.Id,
+					LeaderId:     s.id,
 					PrevLogIndex: nextIndex,
 					LeaderCommit: s.commitIndex,
 					PrevLogTerm:  prevLogTerm,

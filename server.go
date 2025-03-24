@@ -80,6 +80,12 @@ func (s *Server) switchToLeader() {
 	s.electionTicker.Stop()
 	s.electionTickerDuration = 0
 	s.heartbeatTicker.Reset(heartbeatTickerDuration)
+	for pid := range s.nextIndex {
+		s.nextIndex[pid] = s.lastLogIndex + 1
+	}
+	for pid := range s.matchIndex {
+		s.matchIndex[pid] = 0
+	}
 }
 func (s *Server) switchToFollower() {
 	s.role.Store(follower)
@@ -175,7 +181,9 @@ func (s *Server) electionWorker() {
 			s.switchToFollower()
 		} else if votes.Load() >= int32(majority) {
 			s.logger.Info("i am a leader", "id", s.Id)
+			s.indexMu.Lock()
 			s.switchToLeader()
+			s.indexMu.Unlock()
 		}
 		s.mu.Unlock()
 	}

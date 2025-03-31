@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,10 +19,11 @@ import (
 const (
 	follower uint32 = iota
 	leader
+	disabled
 )
 
 const (
-	heartbeatTickerDuration = 100 * time.Millisecond
+	heartbeatTickerDuration = 100 * time.Minute
 )
 
 type Server struct {
@@ -43,7 +46,7 @@ type Server struct {
 }
 
 func randomDuration() time.Duration {
-	return time.Duration((rand.IntN(150) + 150)) * time.Millisecond
+	return time.Duration((rand.IntN(150) + 150)) * time.Minute
 }
 
 func NewServer() *Server {
@@ -52,7 +55,7 @@ func NewServer() *Server {
 	l := Log{}
 	l.Open(s.id)
 
-	lastEntry := l.LastNEntries(1)[0]
+	lastEntry := l.LastEntry()
 	electionTickerDuration := randomDuration()
 	heartbeatTicker := time.NewTicker(heartbeatTickerDuration)
 	heartbeatTicker.Stop()
@@ -93,18 +96,26 @@ func (s *Server) switchToFollower() {
 	s.electionTickerDuration = randomDuration()
 	s.electionTicker.Reset(s.electionTickerDuration)
 }
+func (s *Server) switchToDisabled() {
+	s.role.Store(disabled)
+	s.heartbeatTicker.Stop()
+	s.electionTicker.Stop()
+}
 
 func (s *Server) hearbeatWorker() {
 	for t := range s.heartbeatTicker.C {
-		s.logger.Info("heartbeat", "tick", t)
+		_ = t
+		s.logger.Info("heartbeat", "tick", t, "role", s.role.Load())
 		if time.Since(s.lastHeartBeat).Abs() < heartbeatTickerDuration {
 			continue
 		}
 		s.mu.Lock()
+		peers := maps.Clone(s.Peers)
+		s.mu.Unlock()
 		wg := sync.WaitGroup{}
-		wg.Add(len(s.Peers))
+		wg.Add(len(peers))
 		c, cancel := context.WithTimeout(context.TODO(), time.Duration(300)*time.Millisecond)
-		for pid, peer := range s.Peers {
+		for pid, peer := range peers {
 			go func() {
 				defer wg.Done()
 				req := &AppendEntriesRequest{
@@ -123,6 +134,7 @@ func (s *Server) hearbeatWorker() {
 		}
 		wg.Wait()
 		cancel()
+		s.mu.Lock()
 		s.lastHeartBeat = time.Now()
 		s.mu.Unlock()
 	}
@@ -130,7 +142,8 @@ func (s *Server) hearbeatWorker() {
 
 func (s *Server) electionWorker() {
 	for t := range s.electionTicker.C {
-		s.logger.Info("election tick", "tick", t)
+		s.logger.Info("election tick", "tick", t, "role", s.role.Load())
+		_ = t
 		if s.role.Load() == leader || time.Since(s.lastHeartBeat) < s.electionTickerDuration {
 			continue
 		}
@@ -193,6 +206,10 @@ func (s *Server) RequestVote(c context.Context, req *RequestVoteRequest) (*Reque
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if time.Since(s.lastHeartBeat) <= heartbeatTickerDuration {
+		return &RequestVoteResponse{Term: s.CurrentTerm, VoteGranted: false}, nil
+	}
+
 	if req.Term < s.CurrentTerm {
 		return &RequestVoteResponse{Term: s.CurrentTerm, VoteGranted: false}, nil
 	}
@@ -213,6 +230,53 @@ func (s *Server) RequestVote(c context.Context, req *RequestVoteRequest) (*Reque
 	}
 
 	return &RequestVoteResponse{Term: s.CurrentTerm, VoteGranted: false}, nil
+}
+
+func (s *Server) applyClusterChange(_ context.Context, req *AppendEntriesRequest) (bool, error) {
+	amIKickedOut := false
+	isDisabled := false
+	for _, r := range req.Entries {
+		change := &ClusterChange{}
+		err := json.Unmarshal(r, change)
+		if err != nil {
+			s.logger.Error(err.Error())
+			return false, status.Error(codes.InvalidArgument, err.Error())
+		}
+		isDisabled = isDisabled || change.Disabled
+		if isDisabled {
+			s.switchToDisabled()
+		}
+		if !amIKickedOut {
+			amIKickedOut = !slices.ContainsFunc(change.Cluster, func(p *ClusterChange_Peer) bool { return p.Id == s.id })
+		}
+		change.Cluster = slices.DeleteFunc(change.Cluster, func(p *ClusterChange_Peer) bool { return p.Id == s.id })
+		s.Peers.Update(change)
+	}
+	s.Persist()
+	if !isDisabled && s.role.Load() == disabled {
+		s.switchToFollower()
+	}
+	return amIKickedOut, nil
+}
+
+func (s *Server) persistEntries(_ context.Context, req *AppendEntriesRequest) {
+	entries := make([]Entry, 0, len(req.Entries))
+	for i, e := range req.Entries {
+		entries = append(entries, Entry{
+			Term:  s.CurrentTerm,
+			Index: s.lastLogIndex + uint64(i) + 1,
+			Type:  req.GetType(),
+			Data:  e,
+		})
+	}
+
+	err := s.log.Append(entries)
+	if err != nil {
+		panic(err)
+	}
+
+	s.lastLogIndex += uint64(len(req.Entries))
+	s.lastLogTerm = req.Term
 }
 
 func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
@@ -244,46 +308,48 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	}
 
 	if req.Type == AppendEntriesRequest_ClusterChange {
-		for _, r := range req.Entries {
-			change := &ClusterChange{}
-			err := json.Unmarshal(r, change)
-			if err != nil {
-				s.logger.Error(err.Error())
-				return nil, status.Error(codes.InvalidArgument, err.Error())
-			}
-
-			s.Peers.Remove(change.Remove)
-			s.Peers.Add(change.Add)
+		amIKickedOut, err := s.applyClusterChange(c, req)
+		if err != nil {
+			return nil, err
 		}
-		s.Persist()
+		if amIKickedOut {
+			s.logger.Info("kicked out", "id", s.id, "role", s.role.Load())
+		}
 	}
 
-	prevLogTerm := s.lastLogTerm
-
-	entries := make([]Entry, 0, len(req.Entries))
-	for i, e := range req.Entries {
-		entries = append(entries, Entry{
-			Term:  s.CurrentTerm,
-			Index: s.lastLogIndex + uint64(i) + 1,
-			Data:  e,
-		})
-	}
-
-	err := s.log.Append(entries)
-	if err != nil {
-		panic(err)
-	}
-
-	s.lastLogIndex += uint64(len(req.Entries))
-	s.lastLogTerm = req.Term
+	s.persistEntries(c, req)
 
 	if req.LeaderCommit > s.commitIndex {
 		s.commitIndex = min(req.LeaderCommit, s.lastLogIndex)
 	}
 
-	if s.role.Load() == follower {
-		return &AppendEntriesResponse{Term: s.CurrentTerm, Success: true}, nil
+	return &AppendEntriesResponse{Term: s.CurrentTerm, Success: true}, nil
+}
+
+func (s *Server) LeaderAppendEntries(c context.Context, req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
+	if s.role.Load() != leader {
+		// TODO: return leader id
+		return nil, status.Error(codes.Aborted, "")
 	}
+
+	if len(req.Entries) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "empty entries")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	amIKickedOut := false
+	var err error
+	if req.Type == AppendEntriesRequest_ClusterChange {
+		amIKickedOut, err = s.applyClusterChange(c, req)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	prevLogTerm := s.lastLogTerm
+	s.persistEntries(c, req)
 
 	wg := sync.WaitGroup{}
 	wg.Add(len(s.Peers))
@@ -342,6 +408,9 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	defer s.indexMu.Unlock()
 
 	acks := 1 // count ourselves
+	if amIKickedOut {
+		acks = 0 // on cluster change, the current leader might get kicked out
+	}
 	for _, matchIndex := range s.matchIndex {
 		if s.lastLogIndex > s.commitIndex && matchIndex >= s.lastLogIndex && s.lastLogTerm == s.CurrentTerm {
 			acks++
@@ -351,6 +420,20 @@ func (s *Server) AppendEntries(c context.Context, req *AppendEntriesRequest) (*A
 	acked := acks >= (len(s.Peers)/2)+1
 	if acked {
 		s.commitIndex = s.lastLogIndex
+	}
+
+	if req.GetType() == AppendEntriesRequest_ClusterChange {
+		// The second issue is that the cluster leader may not be
+		// part of the new configuration. In this case, the leader steps
+		// down (returns to follower state) once it has committed the
+		// Cnew log entry. This means that there will be a period of
+		// time (while it is committingCnew) when the leader is managing a cluster that does not include itself; it replicates log
+		// entries but does not count itself in majorities. The leader
+		// transition occurs when Cnew is committed because this is
+		// the first point when the new configuration can operate independently (it will always be possible to choose a leader
+		// from Cnew). Before this point, it may be the case that only
+		// a server from Cold can be elected leader.
+		s.switchToFollower()
 	}
 
 	return &AppendEntriesResponse{Term: s.CurrentTerm, Success: acked}, nil

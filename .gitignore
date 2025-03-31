@@ -1,4 +1,5 @@
 playground
-state.json
-log
+*state.json
+*log
 main
+.vscode

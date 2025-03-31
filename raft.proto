@@ -1,5 +1,3 @@
-// protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=require_unimplemented_servers=false:. --go-grpc_opt=paths=source_relative raft.proto
-
 syntax = "proto3";
 option go_package = "github.com/mhashemm/raft/main";
 package main;
@@ -16,26 +14,26 @@ message RequestVoteResponse {
 }
 
 message ClusterChange {
-	message Peer {
-		string id = 1;
-		string target = 2;
-	}
-	repeated Peer add = 1;
-	repeated string remove = 2;
+  message Peer {
+    string id = 1;
+    string target = 2;
+  }
+	repeated Peer cluster = 1;
+	bool disabled = 2;
 }
 
 message AppendEntriesRequest {
-	enum Type {
-		Command = 0;
-		ClusterChange = 1;
-	}
+  enum Type {
+    Command = 0;
+    ClusterChange = 1;
+  }
   uint64 term = 1;
   string leaderId = 2;
   uint64 prevLogIndex = 3;
-	uint64 prevLogTerm = 4;
+  uint64 prevLogTerm = 4;
   repeated bytes entries = 5;
   uint64 leaderCommit = 6;
-	Type type = 7;
+  Type type = 7;
 }
 message AppendEntriesResponse {
   uint64 term = 1;
@@ -45,4 +43,7 @@ message AppendEntriesResponse {
 service raft {
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse) {}
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+
+  // called by clients to the leader
+  rpc LeaderAppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
 }
